@@ -7,7 +7,7 @@ This module provides the implementation details for:
 - Cost tracking
 """
 
-from prompts import (
+from .prompts import (
     AGENT_INSTRUCTIONS,
     INITIAL_GREETING,
     CLOSING_MESSAGE,
@@ -15,13 +15,13 @@ from prompts import (
     CLARIFICATION_PROMPT
 )
 
-from validation import (
+from .validation import (
     validate_all,
     generate_clarification_questions,
     summarize_intake_data
 )
 
-from cost_tracking import (
+from .cost_tracking import (
     tracker,
     track_llm,
     track_stt,
