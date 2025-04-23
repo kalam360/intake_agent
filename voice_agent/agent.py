@@ -215,8 +215,34 @@ class RealEstateIntakeAgent(Agent):
         # Log the collected data for future reference
         logger.info(f"Collected client data: {self.client_data}")
         
-        # Log the cost summary
+        # Get the usage summary
+        summary = tracker.get_usage_summary()
+        
+        # Log the cost summary to console (not spoken by the agent)
+        logger.info("=== SESSION COST SUMMARY ===")
+        logger.info(f"Total session cost: ${summary['total_cost']:.4f}")
+        logger.info(f"Audio processed: {summary['total_audio_seconds']:.1f} seconds")
+        logger.info(f"Input tokens: {summary['total_input_tokens']} tokens")
+        logger.info(f"Output tokens: {summary['total_output_tokens']} tokens")
+        logger.info(f"Characters synthesized: {summary['total_characters']} characters")
+        logger.info("===========================")
+        
+        # Log detailed usage summary
         tracker.log_usage_summary()
+        
+        # Return cost data for frontend display (added to room metadata)
+        # This can be picked up by your frontend for toast display
+        cost_data = {
+            "total_cost": f"${summary['total_cost']:.4f}",
+            "audio_seconds": f"{summary['total_audio_seconds']:.1f}s",
+            "tokens": f"{summary['total_input_tokens'] + summary['total_output_tokens']}",
+            "characters": f"{summary['total_characters']}"
+        }
+        
+        # If working with LiveKit's room metadata, you could do something like:
+        # await ctx.room.update_metadata(json.dumps({"session_cost": cost_data}))
+        # But since we don't have direct access to ctx here, just log it
+        logger.info(f"FRONTEND_COST_DATA: {cost_data}")
         
         # If we haven't completed the intake and validation, do it now
         if not self.intake_complete:
