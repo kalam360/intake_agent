@@ -1,8 +1,12 @@
 import useCombinedTranscriptions from "@/hooks/useCombinedTranscriptions";
 import * as React from "react";
 
-export default function TranscriptionView() {
-  const combinedTranscriptions = useCombinedTranscriptions();
+export interface TranscriptionViewProps {
+  onAddMessage?: (message: string) => void;
+}
+
+export default function TranscriptionView({ onAddMessage }: TranscriptionViewProps) {
+  const { combinedTranscriptions } = useCombinedTranscriptions();
 
   // scroll to bottom when new transcription is added
   React.useEffect(() => {
@@ -23,8 +27,8 @@ export default function TranscriptionView() {
           key={segment.id}
           className={
             segment.role === "assistant"
-              ? "p-2 self-start fit-content"
-              : "bg-gray-800 rounded-md p-2 self-end fit-content"
+              ? "p-2 self-start fit-content bg-gray-100 dark:bg-gray-800 rounded-md"
+              : "bg-primary text-primary-foreground rounded-md p-2 self-end fit-content"
           }
         >
           {segment.text}
