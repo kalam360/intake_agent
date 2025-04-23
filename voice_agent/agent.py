@@ -1,7 +1,8 @@
 import logging
 from pathlib import Path
 import os
-from typing import Dict, Any, List
+import json
+from typing import Dict, Any, List, Optional
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -24,7 +25,8 @@ from livekit.plugins import (
 )
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
-# Import the intake prompts and validation
+# Import the base agent and intake core
+from .base_agent import BaseIntakeAgent
 from intake_core import (
     AGENT_INSTRUCTIONS,
     INITIAL_GREETING,
@@ -50,27 +52,38 @@ def worker_init(proc: JobProcess):
     # VAD loading is now handled in AgentSession initialization
 
 
-class RealEstateIntakeAgent(Agent):
-    def __init__(self) -> None:
-        super().__init__(
-            instructions=AGENT_INSTRUCTIONS
-        )
-        # Initialize client data dictionary to store intake information
-        self.client_data: Dict[str, Any] = {}
-        # Track conversation state
-        self.intake_complete = False
-        self.validation_in_progress = False
+class RealEstateIntakeAgent(BaseIntakeAgent, Agent):
+    def __init__(self, imported_state: Optional[Dict[str, Any]] = None) -> None:
+        # Initialize both parent classes
+        BaseIntakeAgent.__init__(self)
+        Agent.__init__(self, instructions=AGENT_INSTRUCTIONS)
+        
+        # Import state if provided (for mode switching)
+        if imported_state:
+            self.import_state(imported_state)
+            logger.info(f"Imported state with {len(self.client_data)} client data fields")
 
     async def on_enter(self):
         # This method is called when the agent enters the conversation
-        # We'll use it to trigger the initial greeting
-        await self.session.generate_reply(
-            instructions=INITIAL_GREETING
-        )
+        # If we have imported state, generate a transition message
+        if self.conversation_history:
+            transition_message = self.get_transition_message()
+            await self.session.generate_reply(
+                instructions=transition_message
+            )
+        else:
+            # Otherwise, use the initial greeting
+            await self.session.generate_reply(
+                instructions=INITIAL_GREETING
+            )
     
     async def on_user_message(self, message: str):
         # This method is called when a user message is received
-        # We'll use it to update our client data based on the conversation
+        # Add to conversation history
+        self.conversation_history.append({
+            "role": "user",
+            "content": message
+        })
         
         # If we're in validation mode, check if the user confirmed the information
         if self.validation_in_progress:
@@ -78,14 +91,29 @@ class RealEstateIntakeAgent(Agent):
                 self.intake_complete = True
                 transaction_type = self.client_data.get("transaction_type", "real estate")
                 closing = CLOSING_MESSAGE.format(transaction_type=transaction_type)
+                
+                # Add to conversation history
+                self.conversation_history.append({
+                    "role": "assistant",
+                    "content": closing
+                })
+                
                 await self.session.generate_reply(
                     instructions=closing
                 )
             else:
                 # If they didn't confirm, we'll continue the conversation
                 self.validation_in_progress = False
+                response = "I understand there are some details to correct. Let's continue with the conversation to make sure we get everything right."
+                
+                # Add to conversation history
+                self.conversation_history.append({
+                    "role": "assistant",
+                    "content": response
+                })
+                
                 await self.session.generate_reply(
-                    instructions="I understand there are some details to correct. Let's continue with the conversation to make sure we get everything right."
+                    instructions=response
                 )
     
     @function_tool
@@ -96,21 +124,33 @@ class RealEstateIntakeAgent(Agent):
         # Extract client data from the conversation context
         self.update_client_data(context)
         
-        # Validate the collected data
-        validation_results = validate_all(self.client_data)
+        # Use the base class validation method
+        validation_result = super().validate_intake_information()
         
-        if validation_results:
+        if not validation_result["valid"]:
             # If there are validation issues, generate clarification questions
-            clarification_questions = generate_clarification_questions(validation_results)
-            clarification_text = "\n".join([f"- {q}" for q in clarification_questions])
+            clarification_text = "\n".join([f"- {q}" for q in validation_result["questions"]])
             prompt = CLARIFICATION_PROMPT.format(clarification_questions=clarification_text)
+            self.current_stage = "clarification"
+            
+            # Add to conversation history
+            self.conversation_history.append({
+                "role": "assistant",
+                "content": prompt
+            })
             
             return None, prompt
         else:
             # If validation passes, summarize the data and ask for confirmation
-            summary = summarize_intake_data(self.client_data)
-            prompt = VALIDATION_PROMPT.format(summary=summary)
+            prompt = VALIDATION_PROMPT.format(summary=validation_result["summary"])
             self.validation_in_progress = True
+            self.current_stage = "confirmation"
+            
+            # Add to conversation history
+            self.conversation_history.append({
+                "role": "assistant",
+                "content": prompt
+            })
             
             return None, prompt
     
@@ -133,82 +173,29 @@ class RealEstateIntakeAgent(Agent):
         for api, cost in summary['costs_by_api'].items():
             response += f"- {api}: ${cost:.4f}\n"
         
+        # Add to conversation history
+        self.conversation_history.append({
+            "role": "assistant",
+            "content": response
+        })
+        
         return None, response
     
-    def update_client_data(self, context: RunContext):
+    @function_tool
+    async def export_state_to_metadata(self, context: RunContext):
         """
-        Extract client data from the conversation context.
+        Export the current agent state to room metadata.
+        This allows the frontend to retrieve the state when switching modes.
         """
-        # This is a simplified implementation - in a real system, you would use
-        # more sophisticated NLP to extract structured data from the conversation
+        state = self.export_state()
+        state_json = json.dumps(state)
         
-        # Contact Information
-        if context.get("name") or context.get("full_name"):
-            self.client_data["full_name"] = context.get("name") or context.get("full_name")
+        # In a real implementation, you would update the room metadata
+        # await ctx.room.update_metadata(state_json)
         
-        if context.get("email"):
-            self.client_data["email"] = context.get("email")
+        logger.info(f"Exported state with {len(self.client_data)} client data fields")
         
-        if context.get("phone") or context.get("phone_number"):
-            self.client_data["phone"] = context.get("phone") or context.get("phone_number")
-        
-        if context.get("preferred_contact"):
-            self.client_data["preferred_contact"] = context.get("preferred_contact")
-        
-        # Property Goals
-        if context.get("transaction_type"):
-            self.client_data["transaction_type"] = context.get("transaction_type")
-        elif any(term in str(context).lower() for term in ["buy", "purchase"]):
-            self.client_data["transaction_type"] = "buy"
-        elif "sell" in str(context).lower():
-            self.client_data["transaction_type"] = "sell"
-        elif "rent" in str(context).lower():
-            self.client_data["transaction_type"] = "rent"
-        
-        if context.get("timeline"):
-            self.client_data["timeline"] = context.get("timeline")
-        
-        if context.get("budget") or context.get("price_range"):
-            self.client_data["budget"] = context.get("budget") or context.get("price_range")
-        
-        # Search Criteria
-        if context.get("location") or context.get("area") or context.get("neighborhood"):
-            self.client_data["location"] = context.get("location") or context.get("area") or context.get("neighborhood")
-        
-        if context.get("bedrooms"):
-            self.client_data["bedrooms"] = context.get("bedrooms")
-        
-        if context.get("property_type"):
-            self.client_data["property_type"] = context.get("property_type")
-        
-        if context.get("must_haves") or context.get("requirements"):
-            self.client_data["must_haves"] = context.get("must_haves") or context.get("requirements")
-        
-        # Financing
-        if context.get("pre_approval") is not None:
-            self.client_data["pre_approval"] = context.get("pre_approval")
-        elif "pre-approved" in str(context).lower():
-            self.client_data["pre_approval"] = True
-        
-        if context.get("payment_method"):
-            self.client_data["payment_method"] = context.get("payment_method")
-        elif "cash" in str(context).lower():
-            self.client_data["payment_method"] = "cash"
-        elif any(term in str(context).lower() for term in ["loan", "mortgage", "financing"]):
-            self.client_data["payment_method"] = "loan"
-        
-        # Additional Information
-        if context.get("pets"):
-            self.client_data["pets"] = context.get("pets")
-        
-        if context.get("accessibility"):
-            self.client_data["accessibility"] = context.get("accessibility")
-        
-        if context.get("urgency"):
-            self.client_data["urgency"] = context.get("urgency")
-        
-        if context.get("additional_notes") or context.get("notes"):
-            self.client_data["additional_notes"] = context.get("additional_notes") or context.get("notes")
+        return None, "State exported successfully"
     
     async def on_exit(self):
         # This method is called when the agent exits the conversation
@@ -238,6 +225,9 @@ class RealEstateIntakeAgent(Agent):
             "tokens": f"{summary['total_input_tokens'] + summary['total_output_tokens']}",
             "characters": f"{summary['total_characters']}"
         }
+        
+        # Export state to metadata for potential mode switching
+        await self.export_state_to_metadata(RunContext())
         
         # If working with LiveKit's room metadata, you could do something like:
         # await ctx.room.update_metadata(json.dumps({"session_cost": cost_data}))
